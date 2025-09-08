@@ -1,0 +1,341 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Mini Mario-like Platformer</title>
+  <style>
+    html,body { height:100%; margin:0; background:#87CEEB; font-family:sans-serif; }
+    canvas { display:block; margin:0 auto; background: linear-gradient(#87CEEB, #bde7ff); box-shadow:0 6px 20px rgba(0,0,0,0.2); }
+    #ui { text-align:center; margin-top:8px; color:#222; }
+    button{padding:6px 12px; margin:4px}
+  </style>
+</head>
+<body>
+  <canvas id="game" width="900" height="500"></canvas>
+  <div id="ui">
+    <span id="score">Score: 0</span>
+    &nbsp;|&nbsp;
+    <span id="msg">Use ← → and Z / ↑ to jump. Collect coins. Avoid enemies.</span>
+    <button id="restart">Restart</button>
+  </div>
+
+<script>
+// === CONFIG ===
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const gravity = 0.9;
+const friction = 0.98;
+
+// === INPUT ===
+const keys = {left:false, right:false, up:false};
+window.addEventListener('keydown', e=>{
+  if(e.key === 'ArrowLeft' || e.key === 'a') keys.left = true;
+  if(e.key === 'ArrowRight' || e.key === 'd') keys.right = true;
+  if(e.key === 'ArrowUp' || e.key === 'w' || e.key === 'z' || e.key === ' ') keys.up = true;
+});
+window.addEventListener('keyup', e=>{
+  if(e.key === 'ArrowLeft' || e.key === 'a') keys.left = false;
+  if(e.key === 'ArrowRight' || e.key === 'd') keys.right = false;
+  if(e.key === 'ArrowUp' || e.key === 'w' || e.key === 'z' || e.key === ' ') keys.up = false;
+});
+document.getElementById('restart').addEventListener('click', ()=>resetGame());
+
+// === LEVEL (grid of tiles) ===
+// 0 = empty, 1 = ground/platform, 2 = coin, 3 = enemy spawn, 4 = goal (flag)
+const tileSize = 40;
+const level = [
+  // 22 columns * 12 rows (900x480-ish), add empty columns for horizontal space
+  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0],
+  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,0],
+  [0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0],
+  [0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,2,0,0,0,0,0],
+  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,0],
+  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,0,0,0],
+  [0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0],
+  [1,1,0,0,0,0,0,0,1,1,1,0,0,0,0,1,1,1,0,0,0,0],
+  [0,0,0,0,0,2,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0],
+  [0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0],
+  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+];
+
+// compute world size
+const cols = level[0].length;
+const rows = level.length;
+const worldWidth = cols * tileSize;
+const worldHeight = rows * tileSize;
+
+// === ENTITIES ===
+let player, enemies, coins, camera, score;
+
+// helper rect collision
+function rectsOverlap(a,b){
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+// initialize/reset game
+function resetGame(){
+  player = {
+    x:20, y: H - 120, w:28, h:44,
+    vx:0, vy:0, onGround:false, facing:1
+  };
+  // spawn enemies from tiles with value 3
+  enemies = [];
+  coins = [];
+  score = 0;
+  document.getElementById('score').textContent = 'Score: 0';
+  for(let r=0;r<rows;r++){
+    for(let c=0;c<cols;c++){
+      const t = level[r][c];
+      const tx = c * tileSize, ty = r * tileSize;
+      if(t === 3){
+        enemies.push({x:tx+4, y:ty+4, w:32, h:32, vx:1.2, dir:1, patrol:80, originX:tx+4});
+      } else if(t === 2){
+        coins.push({x:tx + tileSize/2 - 8, y:ty + tileSize/2 - 8, w:16, h:16, taken:false});
+      }
+    }
+  }
+  camera = {x:0, y:0, w:W, h:H};
+}
+resetGame();
+
+// tile helpers
+function tileAtPixel(px, py){
+  const c = Math.floor(px / tileSize);
+  const r = Math.floor(py / tileSize);
+  if(r < 0 || r >= rows || c < 0 || c >= cols) return 0;
+  return level[r][c];
+}
+
+// get tiles overlapped by a rect
+function tilesOverlapping(rect){
+  const tiles = [];
+  const x1 = Math.floor(rect.x / tileSize);
+  const x2 = Math.floor((rect.x + rect.w) / tileSize);
+  const y1 = Math.floor(rect.y / tileSize);
+  const y2 = Math.floor((rect.y + rect.h) / tileSize);
+  for(let r=y1;r<=y2;r++){
+    for(let c=x1;c<=x2;c++){
+      if(r>=0 && r<rows && c>=0 && c<cols){
+        const t = level[r][c];
+        if(t === 1) tiles.push({r,c,x:c*tileSize,y:r*tileSize,w:tileSize,h:tileSize});
+      }
+    }
+  }
+  return tiles;
+}
+
+// physics & update
+function update(dt){
+  // player input
+  if(keys.left) { player.vx -= 0.8; player.facing = -1; }
+  if(keys.right){ player.vx += 0.8; player.facing = 1; }
+  // jump when up pressed and onGround
+  if(keys.up && player.onGround){
+    player.vy = -15;
+    player.onGround = false;
+  }
+
+  // apply physics
+  player.vy += gravity;
+  player.vx *= friction;
+  if(Math.abs(player.vx) < 0.02) player.vx = 0;
+
+  // limit speeds
+  if(player.vx > 6) player.vx = 6;
+  if(player.vx < -6) player.vx = -6;
+  if(player.vy > 20) player.vy = 20;
+
+  // tentative move
+  player.x += player.vx;
+  // horizontal collision
+  const hTiles = tilesOverlapping(player);
+  for(const t of hTiles){
+    if(rectsOverlap(player, t)){
+      if(player.vx > 0){
+        player.x = t.x - player.w - 0.01;
+      } else if(player.vx < 0){
+        player.x = t.x + t.w + 0.01;
+      }
+      player.vx = 0;
+    }
+  }
+
+  // vertical move
+  player.y += player.vy;
+  player.onGround = false;
+  const vTiles = tilesOverlapping(player);
+  for(const t of vTiles){
+    if(rectsOverlap(player, t)){
+      if(player.vy > 0){
+        player.y = t.y - player.h - 0.01;
+        player.vy = 0;
+        player.onGround = true;
+      } else if(player.vy < 0){
+        player.y = t.y + t.h + 0.01;
+        player.vy = 0;
+      }
+    }
+  }
+
+  // coins
+  for(const c of coins){
+    if(!c.taken && rectsOverlap(player, c)){
+      c.taken = true;
+      score += 10;
+      document.getElementById('score').textContent = 'Score: ' + score;
+      // small bounce effect
+      player.vy = -6;
+    }
+  }
+
+  // enemies update & collisions
+  for(const e of enemies){
+    e.x += e.vx * e.dir;
+    // patrol back and forth
+    if(Math.abs(e.x - e.originX) > e.patrol) e.dir *= -1;
+    // check collision with solid tiles (simple)
+    const eRect = {x:e.x, y:e.y, w:e.w, h:e.h};
+    if(rectsOverlap(player, eRect)){
+      // restart level on collision
+      flashMessage('You died! Restarting...');
+      resetGame();
+      return;
+    }
+  }
+
+  // falling out of world
+  if(player.y > worldHeight + 200){
+    flashMessage('Fell! Restarting...');
+    resetGame();
+    return;
+  }
+
+  // goal tile detection
+  // if player overlapped tile value 4 (goal), win
+  const pxCenter = player.x + player.w/2;
+  const pyCenter = player.y + player.h/2;
+  const tc = Math.floor(pxCenter / tileSize);
+  const tr = Math.floor(pyCenter / tileSize);
+  if(tr>=0 && tr<rows && tc>=0 && tc<cols && level[tr][tc] === 4){
+    flashMessage('You reached the flag! You win!');
+    // freeze and reset after short delay
+    setTimeout(()=>resetGame(), 1200);
+  }
+
+  // camera follow (clamped)
+  camera.x = Math.max(0, Math.min(worldWidth - W, player.x - W/2 + player.w/2));
+  camera.y = Math.max(0, Math.min(worldHeight - H, player.y - H/2 + player.h/2));
+}
+
+// simple on-screen message with brief flash
+let msgTimeout = null;
+function flashMessage(text){
+  const el = document.getElementById('msg');
+  el.textContent = text;
+  if(msgTimeout) clearTimeout(msgTimeout);
+  msgTimeout = setTimeout(()=>{ el.textContent = 'Use ← → and Z / ↑ to jump. Collect coins. Avoid enemies.'; }, 1500);
+}
+
+// draw
+function draw(){
+  // background sky gradient is CSS; draw ground and world relative to camera
+  ctx.clearRect(0,0,W,H);
+
+  // draw parallax clouds (simple)
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  for(let i=0;i<6;i++){
+    const cx = (i*180 - camera.x*0.2) % (W+200) - 100;
+    ctx.beginPath();
+    ctx.ellipse(cx, 60 + (i%2)*10, 40, 18, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // draw tiles
+  for(let r=0;r<rows;r++){
+    for(let c=0;c<cols;c++){
+      const t = level[r][c];
+      const x = c*tileSize - camera.x;
+      const y = r*tileSize - camera.y;
+      if(t === 1){
+        // platform tile
+        ctx.fillStyle = '#7a4f1a';
+        ctx.fillRect(x, y, tileSize, tileSize);
+        // top highlight
+        ctx.fillStyle = '#b07a3b';
+        ctx.fillRect(x, y, tileSize, 8);
+      } else if(t === 4){
+        // flag
+        ctx.fillStyle = '#8b0000';
+        ctx.fillRect(x + tileSize - 6, y + 8, 6, tileSize - 8);
+        ctx.fillStyle = '#ff0';
+        ctx.beginPath();
+        ctx.moveTo(x + tileSize - 6, y + 8);
+        ctx.lineTo(x + tileSize - 6 + 20, y + 24);
+        ctx.lineTo(x + tileSize - 6, y + 40);
+        ctx.fill();
+      }
+    }
+  }
+
+  // draw coins
+  for(const c of coins){
+    if(c.taken) continue;
+    const x = c.x - camera.x, y = c.y - camera.y;
+    ctx.fillStyle = 'gold';
+    ctx.beginPath();
+    ctx.arc(x+8, y+8, 8, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    ctx.fillRect(x+3, y+10, 10,2);
+  }
+
+  // draw enemies
+  for(const e of enemies){
+    const x = e.x - camera.x, y = e.y - camera.y;
+    ctx.fillStyle = '#6b0f0f';
+    ctx.fillRect(x, y, e.w, e.h);
+    // eyes
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(x+6, y+8, 6,6);
+    ctx.fillRect(x+e.w-12, y+8, 6,6);
+  }
+
+  // draw player (simple sprite)
+  const px = player.x - camera.x, py = player.y - camera.y;
+  // body
+  ctx.fillStyle = '#ff5252';
+  ctx.fillRect(px, py, player.w, player.h);
+  // cap
+  ctx.fillStyle = '#b22222';
+  ctx.fillRect(px, py-8, player.w, 8);
+  // eye
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(px + (player.facing>0? player.w-12:6), py+10, 6,6);
+
+  // HUD small
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.fillRect(8,8,140,28);
+  ctx.fillStyle = '#fff';
+  ctx.font = '16px sans-serif';
+  ctx.fillText('Score: ' + score, 12, 28);
+}
+
+// main loop
+let last = performance.now();
+function loop(now){
+  const dt = (now - last) / 1000;
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// small helpful instructions
+flashMessage('Ready!');
+
+</script>
+</body>
+</html>
