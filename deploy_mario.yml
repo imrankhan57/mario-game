@@ -1,0 +1,60 @@
+---
+- name: Deploy Mario Game on CentOS from Git
+  hosts: inventory
+  become: true
+
+  vars:
+    web_root: /var/www/html/mario
+    repo_url: "https://github.com/imrankhan57/mario-game.git"
+    repo_version: "main"   # or master, or a specific tag/commit
+
+  tasks:
+    - name: Install required packages
+      yum:
+        name:
+          - httpd
+          - git
+        state: present
+
+    - name: Ensure Apache is running and enabled
+      service:
+        name: httpd
+        state: started
+        enabled: yes
+
+    - name: Create web root directory
+      file:
+        path: "{{ web_root }}"
+        state: directory
+        owner: apache
+        group: apache
+        mode: '0755'
+
+    - name: Pull Mario game from GitHub
+      git:
+        repo: "{{ repo_url }}"
+        dest: "{{ web_root }}"
+        version: "{{ repo_version }}"
+        force: yes
+      notify: Restart Apache
+
+    - name: Create Apache vhost for Mario game
+      copy:
+        dest: /etc/httpd/conf.d/mario.conf
+        content: |
+          <VirtualHost *:80>
+              ServerName mario.local
+              DocumentRoot {{ web_root }}
+              <Directory {{ web_root }}>
+                  Options Indexes FollowSymLinks
+                  AllowOverride None
+                  Require all granted
+              </Directory>
+          </VirtualHost>
+      notify: Restart Apache
+
+  handlers:
+    - name: Restart Apache
+      service:
+        name: httpd
+        state: restarted
